@@ -50,8 +50,8 @@ small{color:var(--muted)}
 <!-- Libraries -->
 <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@2.0.4/dist/qrcode.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/webm-muxer/build/webm-muxer.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/mp4-muxer/build/mp4-muxer.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mp4box@0.5.3/dist/mp4box.all.min.js"></script>
 </head>
 <body>
 <main>
@@ -90,7 +90,7 @@ small{color:var(--muted)}
       <div class="field"><label for="fps">FPS (固定CFR)</label><input id="fps" type="number" min="1" max="60" step="1" value="30"></div>
       <div class="field"><label for="bitrate">ビットレート Mbps</label><input id="bitrate" type="number" min="0.5" max="100" step="0.5" value="12"></div>
       <div class="field"><label for="payloadReserve">QR容量の予約 byte</label><input id="payloadReserve" type="number" min="0" max="256" step="1" value="1"></div>
-      <div class="field"><label for="mimeType">エンコーダ / 形式</label><select id="mimeType"></select></div>
+      <div class="field"><label for="mimeType">形式</label><select id="mimeType"><option value="mp4-avc">MP4 (H.264 / AVC)</option></select></div>
     </div>
     <div class="row" style="margin-top:9px">
       <label class="checkbox"><input id="align16" type="checkbox" checked> 出力辺長を16px境界へ切り上げ</label>
@@ -121,17 +121,16 @@ small{color:var(--muted)}
 <section id="decodeTab" class="tab">
 <div class="grid">
   <div class="panel">
-    <h2>動画入力</h2>
-    <div class="field"><label for="videoInput">動画ファイル</label><input id="videoInput" type="file" accept="video/*"></div>
+    <h2>動画入力 (MP4)</h2>
+    <div class="field"><label for="videoInput">動画ファイル (.mp4)</label><input id="videoInput" type="file" accept="video/mp4,video/*"></div>
     <div class="row" style="margin-top:10px">
-      <button id="decodeBtn" class="primary" disabled>動画を読み取る</button>
+      <button id="decodeBtn" class="primary" disabled>完全分解して復元</button>
       <button id="stopDecodeBtn" class="danger" disabled>停止</button>
     </div>
     <div id="decodeStatus" class="status">動画を選択してください</div>
     <div class="progress"><div id="decodeProgress"></div></div>
     <h3>動画プレビュー</h3>
     <video id="inputVideo" class="preview" controls muted playsinline></video>
-    <canvas id="decodeCanvas" class="hidden"></canvas>
   </div>
   <div class="panel">
     <h2>復元結果</h2>
@@ -158,13 +157,7 @@ const PROTOCOL_VERSION = 1;
 const HEADER_SIZE = 72;
 const MAX_DATA_FRAMES = 99;
 const ALIGNMENT = 16;
-const SETTINGS_KEY = 'qr-video-transfer-settings-v2';
-
-const CODEC_PRESETS = [
-  { id: 'webm-vp9', name: 'WebM / VP9', muxer: 'webm', codec: 'vp09.00.10.08', webmCodec: 'V_VP9', mime: 'video/webm' },
-  { id: 'webm-vp8', name: 'WebM / VP8', muxer: 'webm', codec: 'vp8',           webmCodec: 'V_VP8', mime: 'video/webm' },
-  { id: 'mp4-avc',  name: 'MP4 / H.264', muxer: 'mp4',  codec: 'avc1.42001f',     mp4Codec: 'avc',    mime: 'video/mp4' },
-];
+const SETTINGS_KEY = 'qr-video-transfer-settings-v3';
 
 if (typeof qrcode === 'function') {
   qrcode.stringToBytes = function (s) {
@@ -351,36 +344,7 @@ function currentSettings(){
     align16:$('align16').checked,
     compress:$('compressToggle').checked,
     limit100:$('limit100').checked,
-    codecPreset:$('mimeType').value,
   };
-}
-
-async function refreshMimeOptions(){
-  const sel=$('mimeType'); sel.innerHTML='';
-  if(!('VideoEncoder' in window)){
-    const o=document.createElement('option');o.value='';o.textContent='WebCodecs非対応ブラウザ';sel.appendChild(o);
-    return;
-  }
-  for(const p of CODEC_PRESETS){
-    try{
-      const support = await VideoEncoder.isConfigSupported({
-        codec: p.codec,
-        width: 640,
-        height: 640,
-        bitrate: 12_000_000,
-        framerate: 30
-      });
-      if(support.supported){
-        const o=document.createElement('option');
-        o.value=p.id;
-        o.textContent=`${p.name}`;
-        sel.appendChild(o);
-      }
-    }catch(e){}
-  }
-  if(!sel.options.length){
-    const o=document.createElement('option');o.value='';o.textContent='対応Codecなし';sel.appendChild(o);
-  }
 }
 
 let previewTimer=0;
@@ -407,12 +371,12 @@ function updateEncodeStats(){
     'データフレーム':dataFrames?fmtNum(dataFrames):'0',
     '総フレーム':frameCount?fmtNum(frameCount):'-',
     '動画時間':frameCount?`${(frameCount/s.fps).toFixed(2)} s (固定)`:'-',
-    '出力辺長':side==='-'?'-':`${side} × ${side} px`,
+    '出力サイズ':side==='-'?'-':`${side} × ${side} px`,
     '設定FPS':`${s.fps} fps (CFR)`,
+    '形式':'MP4 (H.264)',
     '圧縮':s.compress?'DEFLATE':'なし',
   });
 
-  // 更新された設定でプレビューを再描画
   clearTimeout(previewTimer);
   previewTimer = setTimeout(() => {
     try{
@@ -473,11 +437,12 @@ function drawDefaultThumbnail(canvas,side=752){
   ctx.fillStyle='rgba(255,255,255,.35)';ctx.beginPath();ctx.arc(side*.78,side*.2,side*.22,0,Math.PI*2);ctx.fill();
   ctx.fillStyle='#12202d';ctx.font=`700 ${Math.max(24,side*.075)}px system-ui,sans-serif`;ctx.textAlign='center';ctx.textBaseline='middle';
   ctx.fillText('DATA VIDEO',side/2,side*.46);
-  ctx.font=`500 ${Math.max(14,side*.032)}px system-ui,sans-serif`;ctx.fillText('QR TRANSFER',side/2,side*.56);
+  ctx.font=`500 ${Math.max(14,side*.032)}px system-ui,sans-serif`;ctx.fillText('QR TRANSFER (MP4)',side/2,side*.56);
 }
 function drawThumbFromImage(canvas,img){
   const side=Math.min(img.width,img.height); 
-  const sx=(img.width-side)/2, sy=(img.height-side)/2; // <- 修正箇所
+  const sx=(img.width-side)/2;
+  const sy=(img.height-side)/2;
   canvas.width=canvas.height=Math.max(64,Math.round(canvas.width||752));
   const ctx=canvas.getContext('2d');
   ctx.imageSmoothingEnabled=true;
@@ -510,7 +475,8 @@ function drawThumbnailToCanvas(target,side){
   if(state.thumbBitmap){
     const img=state.thumbBitmap;
     const crop=Math.min(img.width,img.height);
-    const sx=(img.width-crop)/2,sy=(img.height-crop)/2;
+    const sx=(img.width-crop)/2;
+    const sy=(img.height-crop)/2;
     ctx.drawImage(img,sx,sy,crop,crop,0,0,side,side);
   }else{
     drawDefaultThumbnail(target,side);
@@ -518,7 +484,7 @@ function drawThumbnailToCanvas(target,side){
 }
 
 // -------------------------
-// Encode (WebCodecs + Muxer)
+// Encode (WebCodecs + Mp4Muxer)
 // -------------------------
 async function generateVideo(){
   const info=updateEncodeStats();
@@ -526,7 +492,7 @@ async function generateVideo(){
   if(!textBytes.length){setStatus($('encodeStatus'),'テキストが空です。','warn');return;}
   if(!window.qrcode){setStatus($('encodeStatus'),'QR生成ライブラリの読み込みに失敗しています。','bad');return;}
   if(!('VideoEncoder' in window)){setStatus($('encodeStatus'),'このブラウザはWebCodecs (VideoEncoder) に対応していません。HTTPS環境または最新ブラウザをご利用ください。','bad');return;}
-  if(!s.codecPreset){setStatus($('encodeStatus'),'利用可能な動画codecが選択されていません。','bad');return;}
+  if(!window.Mp4Muxer){setStatus($('encodeStatus'),'Mp4Muxerライブラリの読み込みに失敗しています。','bad');return;}
   if(dataFrames>MAX_DATA_FRAMES && s.limit100){setStatus($('encodeStatus'),`データが大きすぎます。最大99データフレームです（現在 ${dataFrames}）。`,'bad');return;}
   if(payload<=0){setStatus($('encodeStatus'),'このQR設定ではデータを格納できません。','bad');return;}
 
@@ -564,34 +530,15 @@ async function generateVideo(){
     $('qrPreview').width=$('qrPreview').height=actualSide;
     $('qrPreview').getContext('2d').drawImage(qrCanvas,0,0);
 
-    const preset=CODEC_PRESETS.find(p=>p.id===s.codecPreset);
-    if(!preset)throw new Error('選択されたCodec設定が見つかりません');
-
-    // Muxerの初期化
-    let muxer;
-    if(preset.muxer==='webm'){
-      if(!window.WebMMuxer)throw new Error('WebMMuxerライブラリの読み込みに失敗しました');
-      muxer=new WebMMuxer.Muxer({
-        target:new WebMMuxer.ArrayBufferTarget(),
-        video:{
-          codec:preset.webmCodec,
-          width:actualSide,
-          height:actualSide,
-          frameRate:s.fps
-        }
-      });
-    }else{
-      if(!window.Mp4Muxer)throw new Error('Mp4Muxerライブラリの読み込みに失敗しました');
-      muxer=new Mp4Muxer.Muxer({
-        target:new Mp4Muxer.ArrayBufferTarget(),
-        video:{
-          codec:preset.mp4Codec,
-          width:actualSide,
-          height:actualSide
-        },
-        fastStart:'in-memory'
-      });
-    }
+    const muxer = new Mp4Muxer.Muxer({
+      target: new Mp4Muxer.ArrayBufferTarget(),
+      video: {
+        codec: 'avc',
+        width: actualSide,
+        height: actualSide
+      },
+      fastStart: 'in-memory'
+    });
 
     let encoderError=null;
     const videoEncoder=new VideoEncoder({
@@ -599,24 +546,20 @@ async function generateVideo(){
       error:e=>{encoderError=e;console.error(e);}
     });
 
-    const encoderConfig={
-      codec:preset.codec,
-      width:actualSide,
-      height:actualSide,
-      bitrate:Math.round(s.bitrateMbps*1_000_000),
-      framerate:s.fps
-    };
-    if(preset.muxer==='mp4'){
-      encoderConfig.avc={format:'avc'};
-    }
-    videoEncoder.configure(encoderConfig);
+    videoEncoder.configure({
+      codec: 'avc1.42001f', // Baseline profile Level 3.1 (最大互換性)
+      width: actualSide,
+      height: actualSide,
+      bitrate: Math.round(s.bitrateMbps*1_000_000),
+      framerate: s.fps,
+      avc: { format: 'avc' }
+    });
 
     const totalFrames=1+total;
     const frameDurationMicros=Math.round(1_000_000/s.fps);
 
-    logTo($('encodeLog'),`エンコード開始 (WebCodecs CFR: ${s.fps} FPS, ${actualSide}x${actualSide})`);
+    logTo($('encodeLog'),`MP4エンコード開始 (WebCodecs CFR: ${s.fps} FPS, ${actualSide}x${actualSide})`);
 
-    // 固定フレームレートで最高速書き出し
     for(let fi=0;fi<totalFrames;fi++){
       if(encoderError)throw encoderError;
 
@@ -649,14 +592,13 @@ async function generateVideo(){
     await videoEncoder.flush();
     muxer.finalize();
     const videoBuffer=muxer.target.buffer;
-    const blob=new Blob([videoBuffer],{type:preset.mime});
+    const blob=new Blob([videoBuffer],{type:'video/mp4'});
 
     if(state.videoURL)URL.revokeObjectURL(state.videoURL);
     state.videoURL=URL.createObjectURL(blob);
     $('outputVideo').src=state.videoURL;
-    const ext=preset.muxer==='mp4'?'mp4':'webm';
     $('downloadVideo').href=state.videoURL;
-    $('downloadVideo').download=`qr-video-transfer-${Date.now()}.${ext}`;
+    $('downloadVideo').download=`qr-transfer-${Date.now()}.mp4`;
     $('downloadVideo').classList.remove('hidden');
 
     setStats($('encodeStats'),{
@@ -672,7 +614,7 @@ async function generateVideo(){
       '固定FPS':`${s.fps} fps`,
       '動画ファイル':fmtBytes(blob.size),
     });
-    logTo($('encodeLog'),`生成完了: ${fmtBytes(blob.size)} (${ext.toUpperCase()}) / 固定FPS: ${s.fps}`);
+    logTo($('encodeLog'),`生成完了: ${fmtBytes(blob.size)} (MP4) / 固定FPS: ${s.fps}`);
     setProgress($('encodeProgress'),1);
     setStatus($('encodeStatus'),'生成完了','ok');
   }catch(e){
@@ -685,7 +627,7 @@ async function generateVideo(){
 }
 
 // -------------------------
-// Decode (Micro-seek & Web Worker pool)
+// Decode (MP4Box Demux + WebCodecs VideoDecoder + Worker Pool)
 // -------------------------
 function createWorkerPool(size){
   const workerCode = `
@@ -720,32 +662,58 @@ function createWorkerPool(size){
   };
 }
 
-function seekVideo(video, time){
-  return new Promise((resolve, reject)=>{
-    let resolved = false;
-    const onSeeked = () => {
-      if (resolved) return;
-      resolved = true; cleanup(); resolve();
-    };
-    const onError = (e) => {
-      if (resolved) return;
-      resolved = true; cleanup(); reject(e);
-    };
-    const timer = setTimeout(() => {
-      if (resolved) return;
-      resolved = true; cleanup(); resolve(); // タイムアウト時も一応進める
-    }, 1200);
-
-    const cleanup = () => {
-      clearTimeout(timer);
-      video.removeEventListener('seeked', onSeeked);
-      video.removeEventListener('error', onError);
-    };
-
-    video.addEventListener('seeked', onSeeked);
-    video.addEventListener('error', onError);
-    video.currentTime = time;
-  });
+// MP4Box.DataStream が見つからない環境でも確実にAVCCボックスを取り出すための関数
+function getExtradata(mp4boxfile, trackId) {
+  const trak = mp4boxfile.getTrackById(trackId);
+  if (!trak || !trak.mdia || !trak.mdia.minf || !trak.mdia.minf.stbl || !trak.mdia.minf.stbl.stsd) return null;
+  for (const entry of trak.mdia.minf.stbl.stsd.entries) {
+    const box = entry.avcC ?? entry.hvcC ?? entry.vpcC;
+    if (box != null) {
+      // 1. もし window.DataStream が存在する場合はそれを使う（公式推奨）
+      if (typeof window.DataStream !== 'undefined') {
+        const stream = new window.DataStream(undefined, 0, window.DataStream.BIG_ENDIAN || false);
+        box.write(stream);
+        return new Uint8Array(stream.buffer.slice(8)); // ボックスヘッダ(8byte)をスキップ
+      } 
+      // 2. DataStream が無い場合は、VideoDecoderが必要とする AVCDecoderConfigurationRecord を自力でバイナリ構築する
+      else if (box.type === 'avcC') {
+        let size = 7; // 固定ヘッダサイズ
+        if (box.SPS) for(let s of box.SPS) size += 2 + s.length;
+        if (box.PPS) for(let p of box.PPS) size += 2 + p.length;
+        
+        const buf = new Uint8Array(size);
+        let i = 0;
+        buf[i++] = box.configurationVersion;
+        buf[i++] = box.AVCProfileIndication;
+        buf[i++] = box.profile_compatibility;
+        buf[i++] = box.AVCLevelIndication;
+        buf[i++] = 0xFC | (box.lengthSizeMinusOne !== undefined ? box.lengthSizeMinusOne : 3);
+        buf[i++] = 0xE0 | (box.nb_SPS_nalus || (box.SPS ? box.SPS.length : 0));
+        
+        if (box.SPS) {
+          for(let s of box.SPS) {
+            buf[i++] = (s.length >> 8) & 0xFF;
+            buf[i++] = s.length & 0xFF;
+            buf.set(s.nalu, i);
+            i += s.length;
+          }
+        }
+        
+        buf[i++] = box.nb_PPS_nalus || (box.PPS ? box.PPS.length : 0);
+        
+        if (box.PPS) {
+          for(let p of box.PPS) {
+            buf[i++] = (p.length >> 8) & 0xFF;
+            buf[i++] = p.length & 0xFF;
+            buf.set(p.nalu, i);
+            i += p.length;
+          }
+        }
+        return buf;
+      }
+    }
+  }
+  return null;
 }
 
 function computeFrameSignature(data, width, height) {
@@ -770,39 +738,28 @@ function stopDecode(){
 
 async function decodeVideo(){
   if(!state.selectedVideoFile)return;
-  if(!window.jsQR){setStatus($('decodeStatus'),'jsQRの読み込みに失敗しています。','bad');return;}
+  if(!window.MP4Box){setStatus($('decodeStatus'),'MP4Boxライブラリの読み込みに失敗しています。','bad');return;}
+  if(!('VideoDecoder' in window)){setStatus($('decodeStatus'),'このブラウザはWebCodecs (VideoDecoder) に対応していません。','bad');return;}
 
   state.decodeRunning=true;state.decodeStop=false;
   $('decodeBtn').disabled=true;$('stopDecodeBtn').disabled=false;
   $('restoredText').value='';$('downloadTextBtn').classList.add('hidden');$('decodeLog').textContent='';setProgress($('decodeProgress'),0);
   setStats($('decodeStats'),{});
 
-  const video=$('inputVideo'), canvas=$('decodeCanvas'), ctx=canvas.getContext('2d',{willReadFrequently:true});
   const file=state.selectedVideoFile;
-
-  if(state.decodeURL)URL.revokeObjectURL(state.decodeURL);
-  state.decodeURL=URL.createObjectURL(file);video.src=state.decodeURL;video.load();
-
-  await new Promise((resolve,reject)=>{
-    const ok=()=>{cleanup();resolve()}; const err=()=>{cleanup();reject(new Error('動画メタデータを読み込めませんでした。'))};
-    const cleanup=()=>{video.removeEventListener('loadedmetadata',ok);video.removeEventListener('error',err)};
-    video.addEventListener('loadedmetadata',ok);video.addEventListener('error',err);
-  });
-
-  const duration=video.duration||0;
-  canvas.width=video.videoWidth;canvas.height=video.videoHeight;
-
-  // CPUコア数に基づく並列ワーカープールの生成
   const concurrency = Math.max(2, Math.min(8, navigator.hardwareConcurrency || 4));
   const pool = createWorkerPool(concurrency);
-  logTo($('decodeLog'),`動画: ${file.name} (${video.videoWidth}×${video.videoHeight}, ${duration.toFixed(2)}s) / Worker: ${concurrency}並列`);
 
-  const chunks=new Map();
+  logTo($('decodeLog'),`ファイル: ${file.name} (${fmtBytes(file.size)}) / WebCodecs完全分解デコード (${concurrency}並列)`);
+  setStatus($('decodeStatus'),'MP4ファイルをDemux解析中…');
+
+  const chunks = new Map();
   let transferId=null, total=null, originalSize=null, encodedSize=null, flags=null, expectedHash=null;
   let qrCount=0, duplicateCount=0, invalidCount=0, foreignCount=0;
-  let extractedFrames=0;
+  let decodedFramesCount = 0;
+  let processedFramesCount = 0;
+  let isAllChunksCollected = false;
 
-  // 流量制御用
   let inFlight = 0;
   let inFlightResolvers = [];
   function onWorkerFinished(){
@@ -817,7 +774,6 @@ async function decodeVideo(){
     return new Promise(r => inFlightResolvers.push(r));
   }
 
-  // ワーカーのレスポンスハンドラ
   pool.workers.forEach(worker => {
     worker.onmessage = (e) => {
       onWorkerFinished();
@@ -850,67 +806,145 @@ async function decodeVideo(){
           }
         }
       }
+
       if (total !== null) {
         setProgress($('decodeProgress'), chunks.size / total);
         setStatus($('decodeStatus'), `解析中… 受信: ${chunks.size}/${total} chunks (QR検出: ${qrCount})`);
+        if (chunks.size === total && !isAllChunksCollected) {
+          isAllChunksCollected = true;
+          logTo($('decodeLog'), 'すべてのチャンクを受信完了。早期終了します。');
+        }
       }
     };
   });
 
   try {
+    const arrayBuffer = await file.arrayBuffer();
+    arrayBuffer.fileStart = 0;
+
+    const mp4boxfile = MP4Box.createFile();
+    const sampleQueue = [];
+    let fileInfo = null;
+
+    const mp4ReadyPromise = new Promise((resolve, reject) => {
+      mp4boxfile.onReady = (info) => { fileInfo = info; resolve(info); };
+      mp4boxfile.onError = (e) => reject(new Error('MP4Boxエラー: ' + e));
+    });
+
+    mp4boxfile.onSamples = (trackId, ref, samples) => {
+      for (const s of samples) sampleQueue.push(s);
+    };
+
+    mp4boxfile.appendBuffer(arrayBuffer);
+    mp4boxfile.flush();
+    await mp4ReadyPromise;
+
+    const videoTrack = fileInfo.videoTracks[0];
+    if (!videoTrack) throw new Error('動画ファイル内に映像トラックが見つかりませんでした。');
+
+    logTo($('decodeLog'),`トラック: ${videoTrack.codec}, ${videoTrack.video.width || videoTrack.track_width}x${videoTrack.video.height || videoTrack.track_height}, 総サンプル数: ${videoTrack.nb_samples}`);
+
+    mp4boxfile.setExtractionOptions(videoTrack.id, 'video', { nbSamples: videoTrack.nb_samples });
+    mp4boxfile.start();
+
+    const description = getExtradata(mp4boxfile, videoTrack.id);
+    if(!description) throw new Error('動画メタデータからAVCC構成データを抽出できませんでした。');
+
+    let frameCanvas = null;
+    let frameCtx = null;
     let lastSignature = null;
     let roundRobinIdx = 0;
-    const timeStep = 0.02; // 50fps相当のサンプリングで確実に拾う
 
-    for (let t = 0; t <= duration; t += timeStep) {
-      if (state.decodeStop) break;
-      if (total !== null && chunks.size === total) {
-        logTo($('decodeLog'), 'すべてのチャンクを早期取得完了');
-        break;
+    let decoderError = null;
+    const decoder = new VideoDecoder({
+      output: (videoFrame) => {
+        try {
+          decodedFramesCount++;
+          if (state.decodeStop || isAllChunksCollected) {
+            videoFrame.close();
+            return;
+          }
+
+          if (!frameCanvas) {
+            frameCanvas = document.createElement('canvas');
+            frameCanvas.width = videoFrame.displayWidth;
+            frameCanvas.height = videoFrame.displayHeight;
+            frameCtx = frameCanvas.getContext('2d', { willReadFrequently: true });
+          }
+
+          frameCtx.drawImage(videoFrame, 0, 0);
+          videoFrame.close();
+
+          const imgData = frameCtx.getImageData(0, 0, frameCanvas.width, frameCanvas.height);
+          const sig = computeFrameSignature(imgData.data, frameCanvas.width, frameCanvas.height);
+          if (sig === lastSignature) {
+            return;
+          }
+          lastSignature = sig;
+          processedFramesCount++;
+
+          inFlight++;
+          const targetWorker = pool.workers[roundRobinIdx % concurrency];
+          roundRobinIdx++;
+
+          const buffer = imgData.data.buffer;
+          targetWorker.postMessage({
+            id: processedFramesCount,
+            data: imgData.data,
+            width: frameCanvas.width,
+            height: frameCanvas.height
+          }, [buffer]);
+        } catch (err) {
+          console.error(err);
+        }
+      },
+      error: (e) => {
+        decoderError = e;
+        console.error('VideoDecoder error:', e);
       }
+    });
 
-      await seekVideo(video, t);
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    decoder.configure({
+      codec: videoTrack.codec.startsWith('avc1') ? videoTrack.codec : 'avc1.42001f',
+      codedWidth: videoTrack.video.width || videoTrack.track_width,
+      codedHeight: videoTrack.video.height || videoTrack.track_height,
+      description: description
+    });
 
-      const sig = computeFrameSignature(imgData.data, canvas.width, canvas.height);
-      if (sig === lastSignature) {
-        continue; // 前フレームと同一ならスキップ
-      }
-      lastSignature = sig;
-      extractedFrames++;
+    logTo($('decodeLog'), `VideoDecoder初期化完了。全${sampleQueue.length}フレームのデコードを開始`);
+
+    for (let i = 0; i < sampleQueue.length; i++) {
+      if (state.decodeStop || isAllChunksCollected) break;
+      if (decoderError) throw decoderError;
 
       await waitCapacity();
 
-      // ワーカーに転送 (Transferable Objectsでゼロコピー)
-      const targetWorker = pool.workers[roundRobinIdx % concurrency];
-      roundRobinIdx++;
-      inFlight++;
+      const sample = sampleQueue[i];
+      const chunk = new EncodedVideoChunk({
+        type: sample.is_sync ? 'key' : 'delta',
+        timestamp: sample.cts,
+        duration: sample.duration,
+        data: sample.data
+      });
 
-      const buffer = imgData.data.buffer;
-      targetWorker.postMessage({
-        id: extractedFrames,
-        data: imgData.data,
-        width: canvas.width,
-        height: canvas.height
-      }, [buffer]);
+      decoder.decode(chunk);
 
-      if (extractedFrames % 10 === 0) {
-        if (total === null) {
-          setProgress($('decodeProgress'), Math.min(0.95, t / Math.max(0.1, duration)));
-          setStatus($('decodeStatus'), `フレーム走査中… ${t.toFixed(2)}s / ${duration.toFixed(2)}s (抽出: ${extractedFrames})`);
-        }
+      if (i % 15 === 0 && total === null) {
+        setProgress($('decodeProgress'), (i + 1) / sampleQueue.length * 0.5);
+        setStatus($('decodeStatus'), `フレーム解凍中… ${i + 1}/${sampleQueue.length}`);
         await sleep(0);
       }
     }
 
-    // 残りのワーカーの完了を待機
-    while (inFlight > 0) {
-      if (total !== null && chunks.size === total) break;
-      await sleep(30);
+    if (!state.decodeStop && !isAllChunksCollected) {
+      await decoder.flush();
     }
 
-    // 復元処理
+    while (inFlight > 0) {
+      if (isAllChunksCollected) break;
+      await sleep(20);
+    }
+
     if (total !== null && chunks.size === total) {
       const joined = new Uint8Array(encodedSize);
       let p = 0;
@@ -937,24 +971,26 @@ async function decodeVideo(){
 
       setStats($('decodeStats'), {
         '状態': 'VALID (完全復元)',
-        '抽出フレーム': fmtNum(extractedFrames),
+        '総サンプル数': fmtNum(sampleQueue.length),
+        '解凍フレーム': fmtNum(decodedFramesCount),
+        '解析フレーム': fmtNum(processedFramesCount),
         'QR検出数': fmtNum(qrCount),
         'chunk': `${fmtNum(chunks.size)} / ${fmtNum(total)}`,
         '重複検出': fmtNum(duplicateCount),
-        'CRC/破損': fmtNum(invalidCount),
         '圧縮': compressed ? 'DEFLATE' : 'なし',
         '復元サイズ': fmtBytes(plain.length),
         'SHA-256': 'PASS (一致)',
       });
       setProgress($('decodeProgress'), 1);
-      setStatus($('decodeStatus'), '復元完了。SHA-256検証に成功しました。', 'ok');
-      logTo($('decodeLog'), `復元成功: ${fmtBytes(plain.length)}`);
+      setStatus($('decodeStatus'), '復元完了。全チャンクの整合性を確認しました。', 'ok');
+      logTo($('decodeLog'), `復元成功: ${fmtBytes(plain.length)} (解凍フレーム: ${decodedFramesCount})`);
     } else {
       const missing = [];
       if (total !== null) { for (let i = 0; i < total; i++) if (!chunks.has(i)) missing.push(i); }
       setStats($('decodeStats'), {
         '状態': 'INCOMPLETE',
-        '抽出フレーム': fmtNum(extractedFrames),
+        '解凍フレーム': fmtNum(decodedFramesCount),
+        '解析フレーム': fmtNum(processedFramesCount),
         'QR検出数': fmtNum(qrCount),
         'chunk': total !== null ? `${fmtNum(chunks.size)} / ${fmtNum(total)}` : '未確定',
         '欠落chunk': missing.length ? (missing.slice(0, 30).join(',') + (missing.length > 30 ? ' …' : '')) : 'プロトコル未検出',
@@ -981,27 +1017,27 @@ function populateVersions(){
   for(let i=1;i<=40;i++){const o=document.createElement('option');o.value=i;o.textContent=`Version ${i} (${17+4*i}×${17+4*i})`;if(i===40)o.selected=true;s.appendChild(o)}
 }
 function saveSettings(){
-  const ids=['qrVersion','qrEc','modulePx','extraMargin','fps','bitrate','payloadReserve','mimeType','align16','compressToggle','limit100'];
+  const ids=['qrVersion','qrEc','modulePx','extraMargin','fps','bitrate','payloadReserve','align16','compressToggle','limit100'];
   const d={};for(const id of ids){const el=$(id);d[id]=el.type==='checkbox'?el.checked:el.value}
   localStorage.setItem(SETTINGS_KEY,JSON.stringify(d));
 }
 function loadSettings(){
   try{
     const d=JSON.parse(localStorage.getItem(SETTINGS_KEY)||'null');if(!d)return;
-    for(const [id,v] of Object.entries(d)){const el=$(id);if(!el)continue;if(el.type==='checkbox')el.checked=!!v;else if([...el.options||[]].some(o=>o.value===String(v))||el.type!=='select-one')el.value=v;}
+    for(const [id,v] of Object.entries(d)){const el=$(id);if(!el)continue;if(el.type==='checkbox')el.checked=!!v;else el.value=v;}
   }catch{}
 }
 function resetSettings(){
   $('qrVersion').value='40';$('qrEc').value='H';$('modulePx').value='4';$('extraMargin').value='6';$('fps').value='30';$('bitrate').value='12';$('payloadReserve').value='1';$('align16').checked=true;$('compressToggle').checked=true;$('limit100').checked=true;
-  if($('mimeType').options.length)$('mimeType').selectedIndex=0;saveSettings();updateEncodeStats();
+  saveSettings();updateEncodeStats();
 }
 function bindEvents(){
   $('tabEncodeBtn').onclick=()=>{$('encodeTab').classList.add('active');$('decodeTab').classList.remove('active');$('tabEncodeBtn').classList.add('primary');$('tabDecodeBtn').classList.remove('primary')};
   $('tabDecodeBtn').onclick=()=>{$('decodeTab').classList.add('active');$('encodeTab').classList.remove('active');$('tabDecodeBtn').classList.add('primary');$('tabEncodeBtn').classList.remove('primary')};
   $('thumbInput').onchange=()=>{const f=$('thumbInput').files[0];if(f)loadThumbnail(f)};
   $('clearThumbBtn').onclick=()=>{clearThumbnail();$('thumbInput').value=''};
-  ['textInput','qrVersion','qrEc','modulePx','extraMargin','fps','bitrate','payloadReserve','mimeType','align16','compressToggle','limit100'].forEach(id=>$(id).addEventListener('input',()=>{saveSettings();updateEncodeStats()}));
-  $('qrVersion').addEventListener('change',updateEncodeStats);$('qrEc').addEventListener('change',updateEncodeStats);$('mimeType').addEventListener('change',saveSettings);
+  ['textInput','qrVersion','qrEc','modulePx','extraMargin','fps','bitrate','payloadReserve','align16','compressToggle','limit100'].forEach(id=>$(id).addEventListener('input',()=>{saveSettings();updateEncodeStats()}));
+  $('qrVersion').addEventListener('change',updateEncodeStats);$('qrEc').addEventListener('change',updateEncodeStats);
   $('generateBtn').onclick=generateVideo;$('resetSettingsBtn').onclick=resetSettings;
   $('videoInput').onchange=()=>{
     state.selectedVideoFile=$('videoInput').files[0]||null;
@@ -1016,9 +1052,8 @@ function bindEvents(){
   $('decodeBtn').onclick=decodeVideo;$('stopDecodeBtn').onclick=stopDecode;
 }
 
-(async function init(){
+(function init(){
   populateVersions();
-  await refreshMimeOptions();
   loadSettings();
   bindEvents();
   clearThumbnail();
@@ -1027,6 +1062,7 @@ function bindEvents(){
   setTimeout(()=>{
     if(typeof qrcode!=='function')setStatus($('encodeStatus'),'qrcode-generatorを読み込めませんでした。ネットワーク接続を確認してください。','bad');
     if(typeof jsQR!=='function')setStatus($('decodeStatus'),'jsQRを読み込めませんでした。ネットワーク接続を確認してください。','bad');
+    if(typeof MP4Box==='undefined')setStatus($('decodeStatus'),'MP4Boxを読み込めませんでした。ネットワーク接続を確認してください。','bad');
   }, 500);
 })();
 </script>
