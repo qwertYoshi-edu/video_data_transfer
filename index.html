@@ -44,12 +44,14 @@ video.preview{aspect-ratio:1;object-fit:contain;background:#000}
 pre.log{margin:10px 0 0;max-height:280px;overflow:auto;background:#0c0f13;border:1px solid #252b33;border-radius:7px;padding:9px;font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap}
 small{color:var(--muted)}
 .checkbox{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--muted)}
-.range-row{display:grid;grid-template-columns:1fr 100px;gap:8px;align-items:center}
 .hidden{display:none!important}
 @media(max-width:900px){.grid{grid-template-columns:1fr}.formgrid{grid-template-columns:1fr}.preview-wrap{grid-template-columns:1fr 1fr}}
 </style>
+<!-- Libraries -->
 <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@2.0.4/dist/qrcode.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/webm-muxer@5.0.2/build/webm-muxer.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mp4-muxer@5.0.2/build/mp4-muxer.js"></script>
 </head>
 <body>
 <main>
@@ -85,10 +87,10 @@ small{color:var(--muted)}
       <div class="field"><label for="qrEc">誤り訂正</label><select id="qrEc"><option value="L">L</option><option value="M">M</option><option value="Q">Q</option><option value="H" selected>H</option></select></div>
       <div class="field"><label for="modulePx">1 module = px</label><input id="modulePx" type="number" min="1" max="20" step="1" value="4"></div>
       <div class="field"><label for="extraMargin">QR外側余白 px</label><input id="extraMargin" type="number" min="0" max="200" step="1" value="6"></div>
-      <div class="field"><label for="fps">FPS</label><input id="fps" type="number" min="1" max="60" step="1" value="30"></div>
+      <div class="field"><label for="fps">FPS (固定CFR)</label><input id="fps" type="number" min="1" max="60" step="1" value="30"></div>
       <div class="field"><label for="bitrate">ビットレート Mbps</label><input id="bitrate" type="number" min="0.5" max="100" step="0.5" value="12"></div>
       <div class="field"><label for="payloadReserve">QR容量の予約 byte</label><input id="payloadReserve" type="number" min="0" max="256" step="1" value="1"></div>
-      <div class="field"><label for="mimeType">動画codec/container</label><select id="mimeType"></select></div>
+      <div class="field"><label for="mimeType">エンコーダ / 形式</label><select id="mimeType"></select></div>
     </div>
     <div class="row" style="margin-top:9px">
       <label class="checkbox"><input id="align16" type="checkbox" checked> 出力辺長を16px境界へ切り上げ</label>
@@ -156,10 +158,14 @@ const PROTOCOL_VERSION = 1;
 const HEADER_SIZE = 72;
 const MAX_DATA_FRAMES = 99;
 const ALIGNMENT = 16;
-const SETTINGS_KEY = 'qr-video-transfer-settings-v1';
+const SETTINGS_KEY = 'qr-video-transfer-settings-v2';
 
-// qrcode-generator's Byte mode accepts a JS string and converts it via stringToBytes.
-// Override that conversion so every JS code unit is treated as exactly one raw byte.
+const CODEC_PRESETS = [
+  { id: 'webm-vp9', name: 'WebM / VP9', muxer: 'webm', codec: 'vp09.00.10.08', webmCodec: 'V_VP9', mime: 'video/webm' },
+  { id: 'webm-vp8', name: 'WebM / VP8', muxer: 'webm', codec: 'vp8',           webmCodec: 'V_VP8', mime: 'video/webm' },
+  { id: 'mp4-avc',  name: 'MP4 / H.264', muxer: 'mp4',  codec: 'avc1.42001f',     mp4Codec: 'avc',    mime: 'video/mp4' },
+];
+
 if (typeof qrcode === 'function') {
   qrcode.stringToBytes = function (s) {
     const out = new Array(s.length);
@@ -199,7 +205,6 @@ function fmtBytes(n) {
 }
 function fmtNum(n) { return Number(n).toLocaleString('ja-JP'); }
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-function nextPaint() { return new Promise(r => requestAnimationFrame(() => r())); }
 function setStats(container, obj) {
   container.innerHTML = '';
   for (const [k,v] of Object.entries(obj)) {
@@ -229,7 +234,6 @@ function u16(n){const b=new Uint8Array(2);new DataView(b.buffer).setUint16(0,n>>
 function u32(n){const b=new Uint8Array(4);new DataView(b.buffer).setUint32(0,n>>>0);return b}
 function r16(a,o){return new DataView(a.buffer,a.byteOffset,a.byteLength).getUint16(o)}
 function r32(a,o){return new DataView(a.buffer,a.byteOffset,a.byteLength).getUint32(o)}
-function bytesToHex(a){return [...a].map(x=>x.toString(16).padStart(2,'0')).join('')}
 function equalBytes(a,b){if(a.length!==b.length)return false;for(let i=0;i<a.length;i++)if(a[i]!==b[i])return false;return true}
 function bytesToBinaryString(bytes) {
   let out='';
@@ -240,14 +244,9 @@ function bytesToBinaryString(bytes) {
   }
   return out;
 }
-function binaryStringToBytes(str){
-  const a=new Uint8Array(str.length);
-  for(let i=0;i<str.length;i++)a[i]=str.charCodeAt(i)&255;
-  return a;
-}
 
 // -------------------------
-// CRC32
+// CRC32 / Hash / Compression
 // -------------------------
 const CRC_TABLE = (()=>{
   const t=new Uint32Array(256);
@@ -352,25 +351,36 @@ function currentSettings(){
     align16:$('align16').checked,
     compress:$('compressToggle').checked,
     limit100:$('limit100').checked,
-    mime:$('mimeType').value,
+    codecPreset:$('mimeType').value,
   };
 }
 
-function refreshMimeOptions(){
-  const candidates=[
-    ['video/webm;codecs=vp9','WebM / VP9'],
-    ['video/webm;codecs=vp8','WebM / VP8'],
-    ['video/mp4;codecs=avc1.42E01E','MP4 / H.264'],
-    ['video/mp4','MP4'],
-    ['video/webm','WebM'],
-  ];
+async function refreshMimeOptions(){
   const sel=$('mimeType'); sel.innerHTML='';
-  for(const [mime,label] of candidates){
-    if(window.MediaRecorder && MediaRecorder.isTypeSupported(mime)){
-      const o=document.createElement('option');o.value=mime;o.textContent=`${label} (${mime})`;sel.appendChild(o);
-    }
+  if(!('VideoEncoder' in window)){
+    const o=document.createElement('option');o.value='';o.textContent='WebCodecs非対応ブラウザ';sel.appendChild(o);
+    return;
   }
-  if(!sel.options.length){const o=document.createElement('option');o.value='';o.textContent='対応codecなし';sel.appendChild(o);}
+  for(const p of CODEC_PRESETS){
+    try{
+      const support = await VideoEncoder.isConfigSupported({
+        codec: p.codec,
+        width: 640,
+        height: 640,
+        bitrate: 12_000_000,
+        framerate: 30
+      });
+      if(support.supported){
+        const o=document.createElement('option');
+        o.value=p.id;
+        o.textContent=`${p.name}`;
+        sel.appendChild(o);
+      }
+    }catch(e){}
+  }
+  if(!sel.options.length){
+    const o=document.createElement('option');o.value='';o.textContent='対応Codecなし';sel.appendChild(o);
+  }
 }
 
 function updateEncodeStats(){
@@ -395,11 +405,10 @@ function updateEncodeStats(){
     '実データ/chunk':payload?`${fmtNum(payload)} B`:'-',
     'データフレーム':dataFrames?fmtNum(dataFrames):'0',
     '総フレーム':frameCount?fmtNum(frameCount):'-',
-    '動画時間':frameCount?`${(frameCount/s.fps).toFixed(2)} s`:'-',
+    '動画時間':frameCount?`${(frameCount/s.fps).toFixed(2)} s (固定)`:'-',
     '出力辺長':side==='-'?'-':`${side} × ${side} px`,
-    '要求bitrate':`${s.bitrateMbps} Mbps`,
+    '設定FPS':`${s.fps} fps (CFR)`,
     '圧縮':s.compress?'DEFLATE':'なし',
-    '100-frame制限':s.limit100?'有効':'無効',
   });
   return {s,cap,payload,textBytes,dataFrames,frameCount,side};
 }
@@ -434,7 +443,7 @@ function parsePacket(bytes){
   if(total<1 || seq>=total || HEADER_SIZE+len>bytes.length)return null;
   const payload=bytes.slice(HEADER_SIZE,HEADER_SIZE+len);
   const crc=r32(bytes,68);
-  if(crc32(payload)!==crc)return {...null,invalidCrc:true,seq,total};
+  if(crc32(payload)!==crc)return null;
   return {
     flags:bytes[5], transferId:bytes.slice(8,16), seq,total,originalSize,encodedSize,payload,
     hash:bytes.slice(36,68),crc
@@ -455,7 +464,7 @@ function drawDefaultThumbnail(canvas,side=752){
   ctx.font=`500 ${Math.max(14,side*.032)}px system-ui,sans-serif`;ctx.fillText('QR TRANSFER',side/2,side*.56);
 }
 function drawThumbFromImage(canvas,img){
-  const side=Math.min(img.width,img.height); const sx=(img.width-side)/2, sy=(img.height-side)/2;
+  const side=Math.min(img.width,img.height); const sx=(img.width-side)/2, sy=(img.height-crop=side)/2;
   canvas.width=canvas.height=Math.max(64,Math.round(canvas.width||752));
   const ctx=canvas.getContext('2d');ctx.imageSmoothingEnabled=true;ctx.fillStyle='#fff';ctx.fillRect(0,0,canvas.width,canvas.height);
   ctx.drawImage(img,sx,sy,side,side,0,0,canvas.width,canvas.height);
@@ -486,15 +495,15 @@ function drawThumbnailToCanvas(target,side){
 }
 
 // -------------------------
-// Encode
+// Encode (WebCodecs + Muxer)
 // -------------------------
 async function generateVideo(){
   const info=updateEncodeStats();
-  const {s,cap,payload,textBytes,dataFrames,frameCount,side}=info;
+  const {s,cap,payload,textBytes,dataFrames,side}=info;
   if(!textBytes.length){setStatus($('encodeStatus'),'テキストが空です。','warn');return;}
-  if(!window.qrcode||!window.jsQR){setStatus($('encodeStatus'),'QRライブラリの読み込みに失敗しています。','bad');return;}
-  if(!window.MediaRecorder){setStatus($('encodeStatus'),'このブラウザはMediaRecorderに対応していません。','bad');return;}
-  if(!s.mime){setStatus($('encodeStatus'),'利用可能な動画codecがありません。','bad');return;}
+  if(!window.qrcode){setStatus($('encodeStatus'),'QR生成ライブラリの読み込みに失敗しています。','bad');return;}
+  if(!('VideoEncoder' in window)){setStatus($('encodeStatus'),'このブラウザはWebCodecs (VideoEncoder) に対応していません。HTTPS環境または最新ブラウザをご利用ください。','bad');return;}
+  if(!s.codecPreset){setStatus($('encodeStatus'),'利用可能な動画codecが選択されていません。','bad');return;}
   if(dataFrames>MAX_DATA_FRAMES && s.limit100){setStatus($('encodeStatus'),`データが大きすぎます。最大99データフレームです（現在 ${dataFrames}）。`,'bad');return;}
   if(payload<=0){setStatus($('encodeStatus'),'このQR設定ではデータを格納できません。','bad');return;}
 
@@ -528,61 +537,105 @@ async function generateVideo(){
     let actualSide=qrInfo.side;
     const outputCanvas=document.createElement('canvas');
     outputCanvas.width=outputCanvas.height=actualSide;
-    drawThumbnailToCanvas(outputCanvas,actualSide);
 
-    // QR preview
     $('qrPreview').width=$('qrPreview').height=actualSide;
     $('qrPreview').getContext('2d').drawImage(qrCanvas,0,0);
 
-    let stream=outputCanvas.captureStream(0);
-    let track=stream.getVideoTracks()[0];
-    let manualFrame=typeof track.requestFrame==='function';
-    if(!manualFrame){
-      stream.getTracks().forEach(t=>t.stop());
-      stream=outputCanvas.captureStream(s.fps);
-      track=stream.getVideoTracks()[0];
-      manualFrame=false;
-    }
-    const recorderOptions={mimeType:s.mime,videoBitsPerSecond:Math.round(s.bitrateMbps*1_000_000)};
-    const recorder=new MediaRecorder(stream,recorderOptions);
-    const chunks=[];
-    const stopped=new Promise((resolve,reject)=>{
-      recorder.ondataavailable=e=>{if(e.data&&e.data.size)chunks.push(e.data)};
-      recorder.onerror=e=>reject(e.error||new Error('MediaRecorder error'));
-      recorder.onstop=resolve;
-    });
-    recorder.start();
-    await sleep(80);
+    const preset=CODEC_PRESETS.find(p=>p.id===s.codecPreset);
+    if(!preset)throw new Error('選択されたCodec設定が見つかりません');
 
-    const waitPerFrame=1000/s.fps;
-    for(let fi=0;fi<1+total;fi++){
+    // Muxerの初期化
+    let muxer;
+    if(preset.muxer==='webm'){
+      if(!window.WebMMuxer)throw new Error('WebMMuxerライブラリの読み込みに失敗しました');
+      muxer=new WebMMuxer.Muxer({
+        target:new WebMMuxer.ArrayBufferTarget(),
+        video:{
+          codec:preset.webmCodec,
+          width:actualSide,
+          height:actualSide,
+          frameRate:s.fps
+        }
+      });
+    }else{
+      if(!window.Mp4Muxer)throw new Error('Mp4Muxerライブラリの読み込みに失敗しました');
+      muxer=new Mp4Muxer.Muxer({
+        target:new Mp4Muxer.ArrayBufferTarget(),
+        video:{
+          codec:preset.mp4Codec,
+          width:actualSide,
+          height:actualSide
+        },
+        fastStart:'in-memory'
+      });
+    }
+
+    let encoderError=null;
+    const videoEncoder=new VideoEncoder({
+      output:(chunk,meta)=>muxer.addVideoChunk(chunk,meta),
+      error:e=>{encoderError=e;console.error(e);}
+    });
+
+    const encoderConfig={
+      codec:preset.codec,
+      width:actualSide,
+      height:actualSide,
+      bitrate:Math.round(s.bitrateMbps*1_000_000),
+      framerate:s.fps
+    };
+    if(preset.muxer==='mp4'){
+      encoderConfig.avc={format:'avc'};
+    }
+    videoEncoder.configure(encoderConfig);
+
+    const totalFrames=1+total;
+    const frameDurationMicros=Math.round(1_000_000/s.fps);
+
+    logTo($('encodeLog'),`エンコード開始 (WebCodecs CFR: ${s.fps} FPS, ${actualSide}x${actualSide})`);
+
+    // 固定フレームレートで最高速書き出し
+    for(let fi=0;fi<totalFrames;fi++){
+      if(encoderError)throw encoderError;
+
       if(fi===0){
         drawThumbnailToCanvas(outputCanvas,actualSide);
       }else{
         qrInfo=drawQRToCanvas(packets[fi-1],s,qrCanvas);
-        const ctx=outputCanvas.getContext('2d');ctx.imageSmoothingEnabled=false;ctx.drawImage(qrCanvas,0,0,actualSide,actualSide);
+        const ctx=outputCanvas.getContext('2d');
+        ctx.imageSmoothingEnabled=false;
+        ctx.drawImage(qrCanvas,0,0,actualSide,actualSide);
       }
-      if(manualFrame)track.requestFrame();
-      else await nextPaint();
-      setProgress($('encodeProgress'),(fi+1)/(1+total));
-      setStatus($('encodeStatus'),`フレーム ${fi+1}/${1+total}`);
-      await sleep(waitPerFrame);
-    }
-    await sleep(80);
-    recorder.stop();
-    await stopped;
-    stream.getTracks().forEach(t=>t.stop());
 
-    const blob=new Blob(chunks,{type:s.mime});
+      const timestampMicros=fi*frameDurationMicros;
+      const frame=new VideoFrame(outputCanvas,{
+        timestamp:timestampMicros,
+        duration:frameDurationMicros
+      });
+
+      const keyFrame=(fi===0 || fi%s.fps===0);
+      videoEncoder.encode(frame,{keyFrame});
+      frame.close();
+
+      if(fi%5===0 || fi===totalFrames-1){
+        setProgress($('encodeProgress'),(fi+1)/totalFrames);
+        setStatus($('encodeStatus'),`エンコード中: ${fi+1}/${totalFrames} フレーム`);
+        await sleep(0);
+      }
+    }
+
+    await videoEncoder.flush();
+    muxer.finalize();
+    const videoBuffer=muxer.target.buffer;
+    const blob=new Blob([videoBuffer],{type:preset.mime});
+
     if(state.videoURL)URL.revokeObjectURL(state.videoURL);
     state.videoURL=URL.createObjectURL(blob);
     $('outputVideo').src=state.videoURL;
-    const ext=s.mime.includes('mp4')?'mp4':'webm';
+    const ext=preset.muxer==='mp4'?'mp4':'webm';
     $('downloadVideo').href=state.videoURL;
     $('downloadVideo').download=`qr-video-transfer-${Date.now()}.${ext}`;
     $('downloadVideo').classList.remove('hidden');
 
-    const actualMbps=recorder.videoBitsPerSecond?recorder.videoBitsPerSecond/1e6:null;
     setStats($('encodeStats'),{
       '入力サイズ':fmtBytes(textBytes.length),
       '転送payload':fmtBytes(finalPayload.length),
@@ -590,14 +643,13 @@ async function generateVideo(){
       'QR capacity':`${fmtNum(cap)} B`,
       '実データ/chunk':`${fmtNum(payload)} B`,
       'データフレーム':fmtNum(total),
-      '総フレーム':fmtNum(total+1),
-      '動画時間':`${((total+1)/s.fps).toFixed(2)} s`,
+      '総フレーム':fmtNum(totalFrames),
+      '動画時間':`${(totalFrames/s.fps).toFixed(2)} s`,
       '出力サイズ':`${actualSide} × ${actualSide} px`,
-      '要求bitrate':`${s.bitrateMbps} Mbps`,
-      '実bitrate':actualMbps?`${actualMbps.toFixed(2)} Mbps`:'取得不可',
+      '固定FPS':`${s.fps} fps`,
       '動画ファイル':fmtBytes(blob.size),
     });
-    logTo($('encodeLog'),`生成完了: ${fmtBytes(blob.size)} / ${actualMbps?actualMbps.toFixed(2)+' Mbps':'bitrate unknown'}`);
+    logTo($('encodeLog'),`生成完了: ${fmtBytes(blob.size)} (${ext.toUpperCase()}) / 固定FPS: ${s.fps}`);
     setProgress($('encodeProgress'),1);
     setStatus($('encodeStatus'),'生成完了','ok');
   }catch(e){
@@ -610,144 +662,291 @@ async function generateVideo(){
 }
 
 // -------------------------
-// Decode
+// Decode (Micro-seek & Web Worker pool)
 // -------------------------
+function createWorkerPool(size){
+  const workerCode = `
+    self.importScripts('https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js');
+    self.onmessage = function(e) {
+      const { id, data, width, height } = e.data;
+      try {
+        const code = jsQR(data, width, height, { inversionAttempts: 'dontInvert' });
+        if (code && code.binaryData && code.binaryData.length > 0) {
+          const bin = new Uint8Array(code.binaryData);
+          self.postMessage({ id, success: true, binaryData: bin }, [bin.buffer]);
+        } else {
+          self.postMessage({ id, success: false });
+        }
+      } catch (err) {
+        self.postMessage({ id, success: false, error: err.message });
+      }
+    };
+  `;
+  const blob = new Blob([workerCode], {type:'application/javascript'});
+  const workerUrl = URL.createObjectURL(blob);
+  const workers = [];
+  for(let i=0;i<size;i++){
+    workers.push(new Worker(workerUrl));
+  }
+  return {
+    workers,
+    destroy(){
+      workers.forEach(w=>w.terminate());
+      URL.revokeObjectURL(workerUrl);
+    }
+  };
+}
+
+function seekVideo(video, time){
+  return new Promise((resolve, reject)=>{
+    let resolved = false;
+    const onSeeked = () => {
+      if (resolved) return;
+      resolved = true; cleanup(); resolve();
+    };
+    const onError = (e) => {
+      if (resolved) return;
+      resolved = true; cleanup(); reject(e);
+    };
+    const timer = setTimeout(() => {
+      if (resolved) return;
+      resolved = true; cleanup(); resolve();
+    }, 1200);
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      video.removeEventListener('seeked', onSeeked);
+      video.removeEventListener('error', onError);
+    };
+
+    video.addEventListener('seeked', onSeeked);
+    video.addEventListener('error', onError);
+    video.currentTime = time;
+  });
+}
+
+function computeFrameSignature(data, width, height) {
+  let hash = 0;
+  const stepX = Math.max(1, Math.floor(width / 32));
+  const stepY = Math.max(1, Math.floor(height / 32));
+  for (let y = 0; y < height; y += stepY) {
+    const rowOffset = y * width * 4;
+    for (let x = 0; x < width; x += stepX) {
+      const idx = rowOffset + x * 4;
+      const val = (data[idx] << 16) | (data[idx + 1] << 8) | data[idx + 2];
+      hash = ((hash << 5) - hash + val) | 0;
+    }
+  }
+  return hash;
+}
+
 function stopDecode(){
   state.decodeStop=true;
-  try{$('inputVideo').pause();}catch{}
+  setStatus($('decodeStatus'),'停止を要求しました…','warn');
 }
 
 async function decodeVideo(){
   if(!state.selectedVideoFile)return;
   if(!window.jsQR){setStatus($('decodeStatus'),'jsQRの読み込みに失敗しています。','bad');return;}
-  if(!('requestVideoFrameCallback' in HTMLVideoElement.prototype)){
-    setStatus($('decodeStatus'),'このブラウザはrequestVideoFrameCallbackに対応していません。','bad');return;
-  }
+
   state.decodeRunning=true;state.decodeStop=false;
   $('decodeBtn').disabled=true;$('stopDecodeBtn').disabled=false;
   $('restoredText').value='';$('downloadTextBtn').classList.add('hidden');$('decodeLog').textContent='';setProgress($('decodeProgress'),0);
   setStats($('decodeStats'),{});
+
   const video=$('inputVideo'), canvas=$('decodeCanvas'), ctx=canvas.getContext('2d',{willReadFrequently:true});
   const file=state.selectedVideoFile;
+
   if(state.decodeURL)URL.revokeObjectURL(state.decodeURL);
   state.decodeURL=URL.createObjectURL(file);video.src=state.decodeURL;video.load();
+
   await new Promise((resolve,reject)=>{
-    const ok=()=>{cleanup();resolve()}; const err=()=>{cleanup();reject(new Error('動画を読み込めませんでした。'))};
+    const ok=()=>{cleanup();resolve()}; const err=()=>{cleanup();reject(new Error('動画メタデータを読み込めませんでした。'))};
     const cleanup=()=>{video.removeEventListener('loadedmetadata',ok);video.removeEventListener('error',err)};
     video.addEventListener('loadedmetadata',ok);video.addEventListener('error',err);
   });
 
   const duration=video.duration||0;
   canvas.width=video.videoWidth;canvas.height=video.videoHeight;
-  setStatus($('decodeStatus'),`解析中… ${video.videoWidth}×${video.videoHeight}, ${duration.toFixed(2)}s`);
-  logTo($('decodeLog'),`動画: ${file.name} / ${fmtBytes(file.size)} / ${video.videoWidth}×${video.videoHeight} / ${duration.toFixed(2)}s`);
+
+  // CPUコア数に基づく並列ワーカープールの生成
+  const concurrency = Math.max(2, Math.min(8, navigator.hardwareConcurrency || 4));
+  const pool = createWorkerPool(concurrency);
+  logTo($('decodeLog'),`動画: ${file.name} (${video.videoWidth}×${video.videoHeight}, ${duration.toFixed(2)}s) / Worker: ${concurrency}並列`);
 
   const chunks=new Map();
   let transferId=null, total=null, originalSize=null, encodedSize=null, flags=null, expectedHash=null;
-  let frameCount=0, qrCount=0, invalidCount=0, duplicateCount=0, foreignCount=0;
-  let done=false;
+  let qrCount=0, duplicateCount=0, invalidCount=0, foreignCount=0;
+  let extractedFrames=0;
 
-  const finish=async()=>{
-    if(done)return;
-    done=true;
-    try{video.pause();}catch{}
-    setProgress($('decodeProgress'),Math.min(1,total?chunks.size/total:0));
-    if(total!==null && chunks.size===total){
-      const joined=new Uint8Array(encodedSize);
-      let p=0;
-      for(let i=0;i<total;i++){
-        const c=chunks.get(i);if(!c)throw new Error(`chunk ${i} が欠落しています。`);
-        joined.set(c,p);p+=c.length;
-      }
-      const h=await sha256(joined);
-      if(!equalBytes(h,expectedHash))throw new Error('SHA-256検証失敗。動画データが破損しています。');
-      let plain=joined;
-      const compressed=!!(flags&1);
-      if(compressed)plain=await decompressBytes(joined);
-      if(originalSize!==null && plain.length!==originalSize)throw new Error(`復元サイズ不一致: expected ${originalSize}, got ${plain.length}`);
-      const text=new TextDecoder('utf-8',{fatal:true}).decode(plain);
-      $('restoredText').value=text;
-      const outBlob=new Blob([plain],{type:'text/plain;charset=utf-8'});
-      $('downloadTextBtn').onclick=()=>{
-        const u=URL.createObjectURL(outBlob);const a=document.createElement('a');a.href=u;a.download=`restored-${Date.now()}.txt`;a.click();setTimeout(()=>URL.revokeObjectURL(u),1000);
-      };
-      $('downloadTextBtn').classList.remove('hidden');
-      setStats($('decodeStats'),{
-        '状態':'VALID',
-        '受信frame':fmtNum(frameCount),
-        'QR検出':fmtNum(qrCount),
-        'chunk':`${fmtNum(chunks.size)} / ${fmtNum(total)}`,
-        '重複':fmtNum(duplicateCount),
-        'CRCエラー':fmtNum(invalidCount),
-        '異なるtransfer':fmtNum(foreignCount),
-        '圧縮':compressed?'DEFLATE':'なし',
-        '復元サイズ':fmtBytes(plain.length),
-        'SHA-256':'PASS',
-      });
-      setStatus($('decodeStatus'),'復元完了。SHA-256一致。','ok');
-      logTo($('decodeLog'),`復元成功: ${fmtBytes(plain.length)}`);
-      return true;
+  // 流量制御用
+  let inFlight = 0;
+  let inFlightResolvers = [];
+  function onWorkerFinished(){
+    inFlight--;
+    if(inFlightResolvers.length > 0){
+      const resolve = inFlightResolvers.shift();
+      resolve();
     }
-    const missing=[];
-    if(total!==null){for(let i=0;i<total;i++)if(!chunks.has(i))missing.push(i)}
-    setStats($('decodeStats'),{
-      '状態':'INCOMPLETE',
-      '受信frame':fmtNum(frameCount),
-      'QR検出':fmtNum(qrCount),
-      'chunk':total!==null?`${fmtNum(chunks.size)} / ${fmtNum(total)}`:'未確定',
-      '重複':fmtNum(duplicateCount),
-      'CRCエラー':fmtNum(invalidCount),
-      '異なるtransfer':fmtNum(foreignCount),
-      '欠落chunk':missing.slice(0,40).join(',')+(missing.length>40?' …':''),
-    });
-    setStatus($('decodeStatus'),'読み取り終了。必要なchunkが揃っていません。','warn');
-    return false;
-  };
+  }
+  function waitCapacity(){
+    if(inFlight < concurrency * 2) return Promise.resolve();
+    return new Promise(r => inFlightResolvers.push(r));
+  }
 
-  const onFrame=(now,meta)=>{
-    if(state.decodeStop){finish();return;}
-    frameCount++;
-    try{
-      ctx.drawImage(video,0,0,canvas.width,canvas.height);
-      const img=ctx.getImageData(0,0,canvas.width,canvas.height);
-      const code=jsQR(img.data,img.width,img.height,{inversionAttempts:'dontInvert'});
-      if(code){
+  // ワーカーのレスポンスハンドラ
+  pool.workers.forEach(worker => {
+    worker.onmessage = (e) => {
+      onWorkerFinished();
+      const { success, binaryData } = e.data;
+      if (success && binaryData) {
         qrCount++;
-        const packet=parsePacket(Uint8Array.from(code.binaryData));
-        if(packet){
-          if(transferId===null){
-            transferId=packet.transferId.slice();total=packet.total;originalSize=packet.originalSize;encodedSize=packet.encodedSize;flags=packet.flags;expectedHash=packet.hash.slice();
-            logTo($('decodeLog'),`Protocol detected: total=${total}, encoded=${fmtBytes(encodedSize)}, flags=${flags}`);
+        const packet = parsePacket(Uint8Array.from(binaryData));
+        if (packet) {
+          if (transferId === null) {
+            transferId = packet.transferId.slice();
+            total = packet.total;
+            originalSize = packet.originalSize;
+            encodedSize = packet.encodedSize;
+            flags = packet.flags;
+            expectedHash = packet.hash.slice();
+            logTo($('decodeLog'),`プロトコル検出: chunks=${total}, payload=${fmtBytes(encodedSize)}, 圧縮=${!!(flags&1)}`);
           }
-          const same=equalBytes(transferId,packet.transferId);
-          const compatible=same && packet.total===total && packet.encodedSize===encodedSize && packet.originalSize===originalSize && packet.flags===flags && equalBytes(packet.hash,expectedHash);
-          if(compatible){
-            if(chunks.has(packet.seq))duplicateCount++; else chunks.set(packet.seq,packet.payload.slice());
-          }else if(same){
+          const same = equalBytes(transferId, packet.transferId);
+          const compatible = same && packet.total === total && packet.encodedSize === encodedSize && packet.originalSize === originalSize && packet.flags === flags && equalBytes(packet.hash, expectedHash);
+          if (compatible) {
+            if (chunks.has(packet.seq)) {
+              duplicateCount++;
+            } else {
+              chunks.set(packet.seq, packet.payload.slice());
+            }
+          } else if (same) {
             invalidCount++;
-          }else{
+          } else {
             foreignCount++;
           }
         }
       }
-    }catch(e){invalidCount++;}
-    const ratio=total?chunks.size/total:Math.min(.99,frameCount/Math.max(1,duration*30));
-    setProgress($('decodeProgress'),ratio);
-    setStatus($('decodeStatus'),`解析中… frame ${fmtNum(frameCount)} / chunks ${total===null?'-':`${chunks.size}/${total}`}`);
-    if(total!==null && chunks.size===total){finish();return;}
-    if(video.ended || meta.mediaTime>=duration-0.0001){finish();return;}
-    video.requestVideoFrameCallback(onFrame);
-  };
-
-  video.currentTime=0;
-  await new Promise(r=>{
-    const f=()=>{video.removeEventListener('loadeddata',f);r()};
-    if(video.readyState>=2)r();else video.addEventListener('loadeddata',f);
+      if (total !== null) {
+        setProgress($('decodeProgress'), chunks.size / total);
+        setStatus($('decodeStatus'), `解析中… 受信: ${chunks.size}/${total} chunks (QR検出: ${qrCount})`);
+      }
+    };
   });
-  video.requestVideoFrameCallback(onFrame);
-  try{await video.play();}catch(e){
-    setStatus($('decodeStatus'),'動画再生が開始できませんでした。ブラウザの再生制限を確認してください。','bad');
-    finish();
+
+  try {
+    let lastSignature = null;
+    let roundRobinIdx = 0;
+    const timeStep = 0.02; // 50fps相当のサンプリングで確実に拾う
+
+    for (let t = 0; t <= duration; t += timeStep) {
+      if (state.decodeStop) break;
+      if (total !== null && chunks.size === total) {
+        logTo($('decodeLog'), 'すべてのチャンクを早期取得完了');
+        break;
+      }
+
+      await seekVideo(video, t);
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+      const sig = computeFrameSignature(imgData.data, canvas.width, canvas.height);
+      if (sig === lastSignature) {
+        continue; // 前フレームと同一ならスキップ
+      }
+      lastSignature = sig;
+      extractedFrames++;
+
+      await waitCapacity();
+
+      // ワーカーに転送 (Transferable Objectsでゼロコピー)
+      const targetWorker = pool.workers[roundRobinIdx % concurrency];
+      roundRobinIdx++;
+      inFlight++;
+
+      const buffer = imgData.data.buffer;
+      targetWorker.postMessage({
+        id: extractedFrames,
+        data: imgData.data,
+        width: canvas.width,
+        height: canvas.height
+      }, [buffer]);
+
+      if (extractedFrames % 10 === 0) {
+        if (total === null) {
+          setProgress($('decodeProgress'), Math.min(0.95, t / Math.max(0.1, duration)));
+          setStatus($('decodeStatus'), `フレーム走査中… ${t.toFixed(2)}s / ${duration.toFixed(2)}s (抽出: ${extractedFrames})`);
+        }
+        await sleep(0);
+      }
+    }
+
+    // 残りのワーカーの完了を待機
+    while (inFlight > 0) {
+      if (total !== null && chunks.size === total) break;
+      await sleep(30);
+    }
+
+    // 復元処理
+    if (total !== null && chunks.size === total) {
+      const joined = new Uint8Array(encodedSize);
+      let p = 0;
+      for (let i = 0; i < total; i++) {
+        const c = chunks.get(i);
+        if (!c) throw new Error(`chunk ${i} が欠落しています。`);
+        joined.set(c, p); p += c.length;
+      }
+      const h = await sha256(joined);
+      if (!equalBytes(h, expectedHash)) throw new Error('SHA-256検証失敗。動画データが破損しています。');
+
+      let plain = joined;
+      const compressed = !!(flags & 1);
+      if (compressed) plain = await decompressBytes(joined);
+      if (originalSize !== null && plain.length !== originalSize) throw new Error(`復元サイズ不一致: expected ${originalSize}, got ${plain.length}`);
+
+      const text = new TextDecoder('utf-8', { fatal: true }).decode(plain);
+      $('restoredText').value = text;
+      const outBlob = new Blob([plain], { type: 'text/plain;charset=utf-8' });
+      $('downloadTextBtn').onclick = () => {
+        const u = URL.createObjectURL(outBlob); const a = document.createElement('a'); a.href = u; a.download = `restored-${Date.now()}.txt`; a.click(); setTimeout(() => URL.revokeObjectURL(u), 1000);
+      };
+      $('downloadTextBtn').classList.remove('hidden');
+
+      setStats($('decodeStats'), {
+        '状態': 'VALID (完全復元)',
+        '抽出フレーム': fmtNum(extractedFrames),
+        'QR検出数': fmtNum(qrCount),
+        'chunk': `${fmtNum(chunks.size)} / ${fmtNum(total)}`,
+        '重複検出': fmtNum(duplicateCount),
+        'CRC/破損': fmtNum(invalidCount),
+        '圧縮': compressed ? 'DEFLATE' : 'なし',
+        '復元サイズ': fmtBytes(plain.length),
+        'SHA-256': 'PASS (一致)',
+      });
+      setProgress($('decodeProgress'), 1);
+      setStatus($('decodeStatus'), '復元完了。SHA-256検証に成功しました。', 'ok');
+      logTo($('decodeLog'), `復元成功: ${fmtBytes(plain.length)}`);
+    } else {
+      const missing = [];
+      if (total !== null) { for (let i = 0; i < total; i++) if (!chunks.has(i)) missing.push(i); }
+      setStats($('decodeStats'), {
+        '状態': 'INCOMPLETE',
+        '抽出フレーム': fmtNum(extractedFrames),
+        'QR検出数': fmtNum(qrCount),
+        'chunk': total !== null ? `${fmtNum(chunks.size)} / ${fmtNum(total)}` : '未確定',
+        '欠落chunk': missing.length ? (missing.slice(0, 30).join(',') + (missing.length > 30 ? ' …' : '')) : 'プロトコル未検出',
+      });
+      setStatus($('decodeStatus'), '読み取り終了。必要なチャンクが不足しています。', 'warn');
+    }
+  } catch (e) {
+    console.error(e);
+    setStatus($('decodeStatus'), `エラー: ${e.message || e}`, 'bad');
+    logTo($('decodeLog'), String(e.stack || e));
+  } finally {
+    pool.destroy();
+    state.decodeRunning = false;
+    $('decodeBtn').disabled = false;
+    $('stopDecodeBtn').disabled = true;
   }
 }
 
@@ -781,13 +980,19 @@ function bindEvents(){
   ['textInput','qrVersion','qrEc','modulePx','extraMargin','fps','bitrate','payloadReserve','mimeType','align16','compressToggle','limit100'].forEach(id=>$(id).addEventListener('input',()=>{saveSettings();updateEncodeStats()}));
   $('qrVersion').addEventListener('change',updateEncodeStats);$('qrEc').addEventListener('change',updateEncodeStats);$('mimeType').addEventListener('change',saveSettings);
   $('generateBtn').onclick=generateVideo;$('resetSettingsBtn').onclick=resetSettings;
-  $('videoInput').onchange=()=>{state.selectedVideoFile=$('videoInput').files[0]||null;$('decodeBtn').disabled=!state.selectedVideoFile;if(state.selectedVideoFile){if(state.decodeURL)URL.revokeObjectURL(state.decodeURL);state.decodeURL=URL.createObjectURL(state.selectedVideoFile);$('inputVideo').src=state.decodeURL;$('inputVideo').load();setStatus($('decodeStatus'),`${state.selectedVideoFile.name} / ${fmtBytes(state.selectedVideoFile.size)}`)}};
+  $('videoInput').onchange=()=>{
+    state.selectedVideoFile=$('videoInput').files[0]||null;
+    $('decodeBtn').disabled=!state.selectedVideoFile;
+    if(state.selectedVideoFile){
+      if(state.decodeURL)URL.revokeObjectURL(state.decodeURL);
+      state.decodeURL=URL.createObjectURL(state.selectedVideoFile);
+      $('inputVideo').src=state.decodeURL;$('inputVideo').load();
+      setStatus($('decodeStatus'),`${state.selectedVideoFile.name} / ${fmtBytes(state.selectedVideoFile.size)}`);
+    }
+  };
   $('decodeBtn').onclick=decodeVideo;$('stopDecodeBtn').onclick=stopDecode;
 }
 
-populateVersions();refreshMimeOptions();loadSettings();bindEvents();clearThumbnail();updateEncodeStats();
-
-// Refresh QR preview from a tiny zero packet whenever settings change.
 let previewTimer=0;
 function refreshPreview(){
   const s=currentSettings();
@@ -798,14 +1003,21 @@ function refreshPreview(){
   }catch{}
 }
 const oldUpdate=updateEncodeStats;
-updateEncodeStats= function(){const r=oldUpdate();clearTimeout(previewTimer);previewTimer=setTimeout(refreshPreview,30);return r};
-updateEncodeStats();
+updateEncodeStats=function(){const r=oldUpdate();clearTimeout(previewTimer);previewTimer=setTimeout(refreshPreview,30);return r};
 
-// Warn when CDN libraries are unavailable.
-setTimeout(()=>{
-  if(typeof qrcode!=='function')setStatus($('encodeStatus'),'qrcode-generatorを読み込めませんでした。ネットワーク接続/CDN設定を確認してください。','bad');
-  if(typeof jsQR!=='function')setStatus($('decodeStatus'),'jsQRを読み込めませんでした。ネットワーク接続/CDN設定を確認してください。','bad');
-},500);
+(async function init(){
+  populateVersions();
+  await refreshMimeOptions();
+  loadSettings();
+  bindEvents();
+  clearThumbnail();
+  updateEncodeStats();
+
+  setTimeout(()=>{
+    if(typeof qrcode!=='function')setStatus($('encodeStatus'),'qrcode-generatorを読み込めませんでした。','bad');
+    if(typeof jsQR!=='function')setStatus($('decodeStatus'),'jsQRを読み込めませんでした。','bad');
+  },500);
+})();
 </script>
 </body>
 </html>
