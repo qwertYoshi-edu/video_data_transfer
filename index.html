@@ -50,8 +50,8 @@ small{color:var(--muted)}
 <!-- Libraries -->
 <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@2.0.4/dist/qrcode.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/webm-muxer@5.0.2/build/webm-muxer.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/mp4-muxer@5.0.2/build/mp4-muxer.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/webm-muxer/build/webm-muxer.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mp4-muxer/build/mp4-muxer.js"></script>
 </head>
 <body>
 <main>
@@ -383,6 +383,7 @@ async function refreshMimeOptions(){
   }
 }
 
+let previewTimer=0;
 function updateEncodeStats(){
   const s=currentSettings();
   let cap=0, payload=0, side='-';
@@ -410,6 +411,17 @@ function updateEncodeStats(){
     '設定FPS':`${s.fps} fps (CFR)`,
     '圧縮':s.compress?'DEFLATE':'なし',
   });
+
+  // 更新された設定でプレビューを再描画
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(() => {
+    try{
+      const pl = Math.max(1,cap-HEADER_SIZE-s.reserve);
+      const dummyPkt = writePacket({transferId:new Uint8Array(8),seq:0,total:1,originalSize:0,encodedSize:pl,flags:0,hash:new Uint8Array(32),payload:new Uint8Array(Math.min(pl,1))});
+      drawQRToCanvas(dummyPkt,s,$('qrPreview'));
+    }catch{}
+  }, 30);
+
   return {s,cap,payload,textBytes,dataFrames,frameCount,side};
 }
 
@@ -464,9 +476,13 @@ function drawDefaultThumbnail(canvas,side=752){
   ctx.font=`500 ${Math.max(14,side*.032)}px system-ui,sans-serif`;ctx.fillText('QR TRANSFER',side/2,side*.56);
 }
 function drawThumbFromImage(canvas,img){
-  const side=Math.min(img.width,img.height); const sx=(img.width-side)/2, sy=(img.height-crop=side)/2;
+  const side=Math.min(img.width,img.height); 
+  const sx=(img.width-side)/2, sy=(img.height-side)/2; // <- 修正箇所
   canvas.width=canvas.height=Math.max(64,Math.round(canvas.width||752));
-  const ctx=canvas.getContext('2d');ctx.imageSmoothingEnabled=true;ctx.fillStyle='#fff';ctx.fillRect(0,0,canvas.width,canvas.height);
+  const ctx=canvas.getContext('2d');
+  ctx.imageSmoothingEnabled=true;
+  ctx.fillStyle='#fff';
+  ctx.fillRect(0,0,canvas.width,canvas.height);
   ctx.drawImage(img,sx,sy,side,side,0,0,canvas.width,canvas.height);
 }
 async function loadThumbnail(file){
@@ -476,18 +492,25 @@ async function loadThumbnail(file){
     state.thumbBitmap=await createImageBitmap(file);
     drawThumbFromImage($('thumbPreview'),state.thumbBitmap);
   }catch(e){
-    const img=new Image();img.onload=()=>{drawThumbFromImage($('thumbPreview'),img);};img.src=state.thumbURL;state.thumbBitmap=null;
+    const img=new Image();
+    img.onload=()=>{drawThumbFromImage($('thumbPreview'),img);};
+    img.src=state.thumbURL;
+    state.thumbBitmap=null;
   }
 }
 function clearThumbnail(){
-  if(state.thumbURL)URL.revokeObjectURL(state.thumbURL);state.thumbURL=null;state.thumbBitmap=null;
+  if(state.thumbURL)URL.revokeObjectURL(state.thumbURL);
+  state.thumbURL=null;
+  state.thumbBitmap=null;
   drawDefaultThumbnail($('thumbPreview'),752);
 }
 function drawThumbnailToCanvas(target,side){
   target.width=target.height=side;
   const ctx=target.getContext('2d');ctx.imageSmoothingEnabled=true;
   if(state.thumbBitmap){
-    const img=state.thumbBitmap;const crop=Math.min(img.width,img.height);const sx=(img.width-crop)/2,sy=(img.height-crop)/2;
+    const img=state.thumbBitmap;
+    const crop=Math.min(img.width,img.height);
+    const sx=(img.width-crop)/2,sy=(img.height-crop)/2;
     ctx.drawImage(img,sx,sy,crop,crop,0,0,side,side);
   }else{
     drawDefaultThumbnail(target,side);
@@ -710,7 +733,7 @@ function seekVideo(video, time){
     };
     const timer = setTimeout(() => {
       if (resolved) return;
-      resolved = true; cleanup(); resolve();
+      resolved = true; cleanup(); resolve(); // タイムアウト時も一応進める
     }, 1200);
 
     const cleanup = () => {
@@ -993,18 +1016,6 @@ function bindEvents(){
   $('decodeBtn').onclick=decodeVideo;$('stopDecodeBtn').onclick=stopDecode;
 }
 
-let previewTimer=0;
-function refreshPreview(){
-  const s=currentSettings();
-  try{
-    const cap=getQRCapacity(s.version,s.ec);const payload=Math.max(1,cap-HEADER_SIZE-s.reserve);
-    const dummy=writePacket({transferId:new Uint8Array(8),seq:0,total:1,originalSize:0,encodedSize:payload,flags:0,hash:new Uint8Array(32),payload:new Uint8Array(Math.min(payload,1))});
-    drawQRToCanvas(dummy,s,$('qrPreview'));
-  }catch{}
-}
-const oldUpdate=updateEncodeStats;
-updateEncodeStats=function(){const r=oldUpdate();clearTimeout(previewTimer);previewTimer=setTimeout(refreshPreview,30);return r};
-
 (async function init(){
   populateVersions();
   await refreshMimeOptions();
@@ -1014,9 +1025,9 @@ updateEncodeStats=function(){const r=oldUpdate();clearTimeout(previewTimer);prev
   updateEncodeStats();
 
   setTimeout(()=>{
-    if(typeof qrcode!=='function')setStatus($('encodeStatus'),'qrcode-generatorを読み込めませんでした。','bad');
-    if(typeof jsQR!=='function')setStatus($('decodeStatus'),'jsQRを読み込めませんでした。','bad');
-  },500);
+    if(typeof qrcode!=='function')setStatus($('encodeStatus'),'qrcode-generatorを読み込めませんでした。ネットワーク接続を確認してください。','bad');
+    if(typeof jsQR!=='function')setStatus($('decodeStatus'),'jsQRを読み込めませんでした。ネットワーク接続を確認してください。','bad');
+  }, 500);
 })();
 </script>
 </body>
