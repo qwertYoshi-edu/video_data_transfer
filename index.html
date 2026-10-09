@@ -5,47 +5,24 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>QR Video Transfer</title>
 <style>
-:root{color-scheme:dark;--bg:#0d0f12;--panel:#171a1f;--panel2:#20252c;--line:#303742;--text:#eef2f6;--muted:#9da8b5;--accent:#5ba9ff;--ok:#64d18a;--warn:#f1c45c;--bad:#ff7373}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
-main{max-width:1180px;margin:0 auto;padding:18px}
-h1{font-size:22px;margin:0 0 14px}
-h2{font-size:16px;margin:0 0 12px}
-h3{font-size:14px;margin:16px 0 8px}
-.tabs{display:flex;gap:8px;margin-bottom:14px}
-button,.button{appearance:none;border:1px solid var(--line);background:var(--panel2);color:var(--text);border-radius:8px;padding:9px 13px;cursor:pointer;font-weight:600}
-button:hover,.button:hover{border-color:#4b5664;background:#272d35}
-button.primary{background:#255f9d;border-color:#3078c7}
-button.danger{background:#6f2626;border-color:#974141}
-button:disabled{opacity:.45;cursor:not-allowed}
-input,select,textarea{width:100%;background:#0f1216;color:var(--text);border:1px solid var(--line);border-radius:7px;padding:8px 9px;font:inherit}
-textarea{min-height:180px;resize:vertical;line-height:1.5}
-input[type=file]{padding:6px}
-input[type=checkbox]{width:auto;transform:translateY(1px)}
 .tab{display:none}.tab.active{display:block}
-.grid{display:grid;grid-template-columns:1.15fr .85fr;gap:14px}
-.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px}
-.formgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
-.field label{display:block;font-size:12px;color:var(--muted);margin-bottom:5px}
-.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-.row>*{flex:0 0 auto}
-.help{font-size:11px;color:var(--muted);line-height:1.45}
-.stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;margin-top:10px}
-.stat{background:#111419;border:1px solid #272d35;border-radius:7px;padding:8px}
-.stat .k{font-size:10px;color:var(--muted)}
-.stat .v{font-size:13px;margin-top:2px;word-break:break-word}
-.status{margin-top:10px;padding:10px;border-radius:7px;background:#111419;border:1px solid var(--line);font-size:12px;white-space:pre-wrap}
-.status.ok{border-color:#285f42;color:#b9f1cb}.status.warn{border-color:#725d27;color:#f4dfa1}.status.bad{border-color:#7b3333;color:#ffb0b0}
-.progress{height:7px;background:#0c0e11;border-radius:999px;overflow:hidden;border:1px solid #272d35;margin-top:10px}
-.progress>div{height:100%;width:0;background:var(--accent);transition:width .08s linear}
-.preview-wrap{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
-.preview{width:100%;aspect-ratio:1;border:1px solid var(--line);background:#fff;border-radius:6px;object-fit:contain}
-video.preview{aspect-ratio:1;object-fit:contain;background:#000}
-pre.log{margin:10px 0 0;max-height:280px;overflow:auto;background:#0c0f13;border:1px solid #252b33;border-radius:7px;padding:9px;font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap}
-small{color:var(--muted)}
-.checkbox{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--muted)}
 .hidden{display:none!important}
-@media(max-width:900px){.grid{grid-template-columns:1fr}.formgrid{grid-template-columns:1fr}.preview-wrap{grid-template-columns:1fr 1fr}}
+.tabs,.row,.checkbox{display:flex;gap:5px;flex-wrap:wrap}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.formgrid,.stats,.preview-wrap{display:grid;grid-template-columns:1fr 1fr;gap:5px}
+.panel,.stat,.status,.log{border:1px solid #ccc;padding:5px}
+input,select,textarea{width:100%}
+input[type=checkbox]{width:auto}
+textarea{min-height:150px}
+.progress{height:10px;background:#eee;width:100%;margin:5px 0}
+.progress>div{height:100%;width:0;background:blue}
+.preview{width:100%;aspect-ratio:1;object-fit:contain;border:1px solid #000;background:#fff}
+.log{max-height:200px;overflow:auto;white-space:pre-wrap}
+.status.ok{color:green}.status.warn{color:orange}.status.bad{color:red}
+button.primary{background:#007bff;color:#fff}
+button.danger{background:#dc3545;color:#fff}
+@media(max-width:900px){.grid,.formgrid,.preview-wrap{grid-template-columns:1fr}}
 </style>
 <!-- Libraries -->
 <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@2.0.4/dist/qrcode.js"></script>
